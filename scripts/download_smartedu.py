@@ -320,8 +320,12 @@ def token_expires_at(info: dict) -> Optional[datetime]:
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(value, str):
+        # 平台格式形如 2026-10-24T15:11:39.299+0800：Python 3.11 之前 fromisoformat
+        # 不接受「+0800」这种无冒号偏移，先统一成「+08:00」再解析。
+        text = value.strip().replace("Z", "+00:00")
+        text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
         try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(text)
         except ValueError:
             return None
         return parsed if parsed.tzinfo else parsed.astimezone()
