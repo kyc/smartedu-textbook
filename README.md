@@ -10,6 +10,8 @@
 
 许可证：[MIT](LICENSE)（仅覆盖本项目代码；下载到的教材版权归各出版社所有）。
 
+[![CI](https://github.com/kyc/smartedu-textbook/actions/workflows/ci.yml/badge.svg)](https://github.com/kyc/smartedu-textbook/actions/workflows/ci.yml)
+
 ---
 
 ## 目录
