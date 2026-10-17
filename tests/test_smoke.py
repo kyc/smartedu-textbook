@@ -43,11 +43,15 @@ class TestCli(OfflineCase):
         env = {k: v for k, v in os.environ.items() if k != "UC_TOKEN"}
         env.update(env_extra or {})
         env["SMARTEDU_CACHE_DIR"] = self._tmp.name
+        # 脚本自己会把 stdout 切成 UTF-8，这里必须显式按 UTF-8 解码；
+        # 用 text=True 会按 Windows 的 cp1252 解码，直接把中文输出读崩。
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), *argv],
-            capture_output=True, text=True, env=env, timeout=120,
+            capture_output=True, env=env, timeout=120,
         )
-        return proc.returncode, proc.stdout, proc.stderr
+        return (proc.returncode,
+                proc.stdout.decode("utf-8", errors="replace"),
+                proc.stderr.decode("utf-8", errors="replace"))
 
     def test_help_lists_all_commands(self):
         code, out, err = self.run_cli(["--help"])
