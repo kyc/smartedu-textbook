@@ -8,6 +8,8 @@
 
 面向 AI Agent 的精简说明见 [`SKILL.md`](SKILL.md)；本文档面向人类用户，包含原理、参数、实测数据与排错细节。
 
+许可证：[MIT](LICENSE)（仅覆盖本项目代码；下载到的教材版权归各出版社所有）。
+
 ---
 
 ## 目录
@@ -21,6 +23,7 @@
 - [缓存机制](#缓存机制)
 - [实测数据](#实测数据)
 - [排错手册](#排错手册)
+- [开发与测试](#开发与测试)
 - [已知限制](#已知限制)
 - [项目结构](#项目结构)
 
@@ -400,8 +403,12 @@ python3 scripts/download_smartedu.py audio <contentId> --token-from-shell
 smartedu-textbook/
 ├── SKILL.md                      # 面向 AI Agent 的精简指令（Agent 加载入口）
 ├── README.md                     # 本文档
-└── scripts/
-    └── download_smartedu.py      # 单文件 CLI，约 730 行，仅标准库
+├── LICENSE                       # MIT
+├── scripts/
+│   └── download_smartedu.py      # 单文件 CLI，仅标准库
+├── tests/
+│   └── test_smoke.py             # 离线测试（不联网、不写用户缓存）
+└── .github/workflows/ci.yml      # CI：3 大平台 × Python 3.9/3.12
 ```
 
 脚本按职责分区：
@@ -418,6 +425,28 @@ smartedu-textbook/
 | Token 获取 | `decode_uc_token`、`token_expires_at`、`scan_shell_configs`、`resolve_token` |
 | 自检 | `cmd_doctor`、`_doctor_probe_public`、`_doctor_probe_signed`、`_mask` |
 | CLI | `cmd_search`、`cmd_download`、`cmd_audio`、`build_parser`、`main` |
+
+---
+
+## 开发与测试
+
+```bash
+# 离线测试：不联网，不写用户缓存（缓存指到临时目录）
+python3 -m unittest discover -s tests -v
+
+# 语法检查 + CLI 冒烟
+python3 -m py_compile scripts/download_smartedu.py
+python3 scripts/download_smartedu.py --help
+python3 scripts/download_smartedu.py doctor        # 不带 --verify 时完全离线
+```
+
+测试覆盖的是**容易退化且无需联网**的部分：Token 解码（Bearer 前缀、URL-safe、缺字段）、
+`expires_at` 的 ISO 字符串与 Unix 秒/毫秒两种格式、各 shell 语法解析、取值优先级、
+镜像回退（签名请求 401 立即上抛、公开请求 403 试完所有镜像）、CLI 各子命令的 `--help`、
+以及「没有 Token 时给出四种解决方式」的提示文案。
+
+CI（`.github/workflows/ci.yml`）在 Ubuntu / macOS / Windows × Python 3.9 / 3.12 上跑同一套离线测试，
+另有一个 job 跑不带 `--verify` 的 `doctor`——**不访问平台接口、不依赖任何凭证**，因此不会因平台风控而红。
 
 ---
 
