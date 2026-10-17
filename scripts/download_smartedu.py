@@ -962,7 +962,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ensure_utf8_stdio() -> None:
+    """输出全部是中文。Windows 控制台默认是 cp936/GBK，重定向到管道时甚至可能是 cp1252，
+    遇到 GBK 之外的字符（如「•」）会直接 UnicodeEncodeError 崩掉。
+    这里把 stdout/stderr 换成 UTF-8 并放宽编码错误处理，避免因为打印而失败。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # 已被重定向成不支持 reconfigure 的对象
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main():
+    _ensure_utf8_stdio()
     args = build_parser().parse_args()
     try:
         if args.command == "search":

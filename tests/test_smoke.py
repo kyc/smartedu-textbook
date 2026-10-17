@@ -59,6 +59,14 @@ class TestCli(OfflineCase):
         code, out, _ = self.run_cli(["doctor", "--help"])
         self.assertIn("--verify", out)
 
+    def test_help_survives_non_utf8_console(self):
+        """Windows 控制台常见 cp936/cp1252，重定向到管道时历史上会 UnicodeEncodeError。"""
+        for encoding in ("ascii", "cp1252", "cp936"):
+            with self.subTest(encoding=encoding):
+                code, out, err = self.run_cli(["--help"], env_extra={"PYTHONIOENCODING": encoding})
+                self.assertEqual(code, 0, err)
+                self.assertIn("usage", out)
+
     def test_each_subcommand_has_help(self):
         for cmd in ("search", "download", "audio", "doctor"):
             with self.subTest(cmd=cmd):
