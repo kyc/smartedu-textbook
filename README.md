@@ -25,6 +25,7 @@
 - [缓存机制](#缓存机制)
 - [实测数据](#实测数据)
 - [排错手册](#排错手册)
+- [作为 Agent 技能使用（SKILL.md）](#作为-agent-技能使用skillmd)
 - [开发与测试](#开发与测试)
 - [已知限制](#已知限制)
 - [项目结构](#项目结构)
@@ -77,25 +78,94 @@ python3 scripts/download_smartedu.py search <关键词...> [--limit N] [--json] 
 
 匹配范围为 `title + breadcrumbs` 的小写子串。关键词内部如有空格会被拆成多个词，因此 `小学 英语` 与 `"小学 英语"`（一个参数）等价。
 
-**输出示例**
+**检索示例**
+
+关键词之间是 **AND** 关系，词越多越精确；`学段 + 学科 + 版本 + 年级 + 册次` 是最常用的组合。
+
+最典型的完整写法（精确到一本）：
+
+```bash
+python3 scripts/download_smartedu.py search 小学 数学 人教版 一年级 上册
+```
 
 ```text
-检索到 2 条符合条件的资源:
+检索到 1 条符合条件的资源:
 
 序号   Content ID                             教材名称与分类
 ------------------------------------------------------------------------------------------
-1    27eb5941-f566-431a-a2a6-92e45a2995e1   （根据2022年版课程标准修订）义务教育教科书·英语 五年级上册
-     └─ 分类: 电子教材 > 小学 > 英语 > 教科版（主编：龚亚夫） > 五年级 > 上册
-2    285ae1ca-33f3-40b5-b9c8-c6fd8256168b   义务教育教科书·英语（三年级起点）五年级下册
-     └─ 分类: 电子教材 > 小学 > 英语 > 教科版（主编：龚亚夫） > 五年级 > 下册
+1    c3e06fe4-c6b3-49cb-8727-4f8ff69bbfbc   （根据2022年版课程标准修订）义务教育教科书 · 数学一年级上册
+     └─ 分类: 电子教材 > 小学 > 数学 > 人教版 > 一年级 > 上册
+```
+
+去掉版本，看同一册有多少个版本（实测命中 12 条）：
+
+```bash
+python3 scripts/download_smartedu.py search 一年级 上册 数学
+```
+
+```text
+检索到 12 条符合条件的资源:
+
+序号   Content ID                             教材名称与分类
+------------------------------------------------------------------------------------------
+1    c3e06fe4-c6b3-49cb-8727-4f8ff69bbfbc   （根据2022年版课程标准修订）义务教育教科书 · 数学一年级上册
+     └─ 分类: 电子教材 > 小学 > 数学 > 人教版 > 一年级 > 上册
+2    7b435b01-7a16-4b72-8b38-653fe9eb94ae   （根据2022年版课程标准修订）义务教育教科书•数学一年级上册
+     └─ 分类: 电子教材 > 小学 > 数学 > 北京版 > 一年级 > 上册
+3    e9a3cef0-a95c-4ad6-93c2-eb0aaadc8891   （根据2022年版课程标准修订）义务教育教科书•数学一年级上册
+     └─ 分类: 电子教材 > 小学 > 数学 > 北师大版 > 一年级 > 上册
+4    dc10c400-3f13-4856-867d-87659e985049   （根据2022年版课程标准修订）义务教育教科书•数学一年级上册
+     └─ 分类: 电子教材 > 小学 > 数学 > 冀教版 > 一年级 > 上册
+... 还有 8 条未展示，请增加关键词或调大 --limit。
+```
+
+学段可以省略——`小学`/`初中`/`高中` 本来就在分类里，写了只会让条件更严：
+
+```bash
+python3 scripts/download_smartedu.py search 数学 人教版 一年级 上册      # 与上面第一条命令结果相同
+python3 scripts/download_smartedu.py search 数学 七年级 上册 人教         # 初中 → 人教版 七年级 上册
+python3 scripts/download_smartedu.py search 英语 三年级起点               # 命中 40 条（多个出版社）
+```
+
+结果太多时加 `--limit`，程序处理时用 `--json`：
+
+```bash
+python3 scripts/download_smartedu.py search 语文 --limit 5        # 末尾会提示「还有 187 条未展示」
+python3 scripts/download_smartedu.py search 数学 一年级 --json --limit 2
+```
+
+```json
+[
+  {
+    "id": "c3e06fe4-c6b3-49cb-8727-4f8ff69bbfbc",
+    "title": "（根据2022年版课程标准修订）义务教育教科书 · 数学一年级上册",
+    "breadcrumbs": "电子教材 > 小学 > 数学 > 人教版 > 一年级 > 上册",
+    "kind": "assets_document"
+  },
+  {
+    "id": "7b435b01-7a16-4b72-8b38-653fe9eb94ae",
+    "title": "（根据2022年版课程标准修订）义务教育教科书•数学一年级上册",
+    "breadcrumbs": "电子教材 > 小学 > 数学 > 北京版 > 一年级 > 上册",
+    "kind": "assets_document"
+  }
+]
+```
+
+把 JSON 直接喂给下载命令（配合 `jq`）：
+
+```bash
+ID=$(python3 scripts/download_smartedu.py search 小学 数学 人教版 一年级 上册 --json \
+     | jq -r '.[0].id')
+python3 scripts/download_smartedu.py download "$ID" -o 数学一年级上册.pdf
 ```
 
 **检索技巧**
 
-- 书名里常带「（根据2022年版课程标准修订）」等前缀，只搜书名主体更容易命中。
-- 想按学段/学科/版本精确筛选，直接叠加词：`小学 数学 人教版 三年级 上册`。
+- 书名里常带「（根据2022年版课程标准修订）」前缀，**不要**把它写进关键词，只搜书名主体（学科/年级/册次）即可命中。
+- 关键词的 AND 逻辑是「子串同时出现」，因此 `人教` 能匹配 `人教版`，`三起` 匹配不到 `三年级起点`（不连续）。
 - 结果 `分类` 为空时，说明是平台未收录分类的教学指南/课件类资源（见[已知限制](#已知限制)）。
 - 换关键词不会触发索引刷新，索引只在版本号变化时重新拉取，所以反复检索很快。
+- 检索本身**不需要 Token**：索引已缓存时纯离线，冷缓存时才会拉一次分片（约 3,565 条，之后走缓存）。可以放心先搜后下。
 
 ### `download` — 下载教材 PDF
 
@@ -427,6 +497,140 @@ smartedu-textbook/
 | Token 获取 | `decode_uc_token`、`token_expires_at`、`scan_shell_configs`、`resolve_token` |
 | 自检 | `cmd_doctor`、`_doctor_probe_public`、`_doctor_probe_signed`、`_mask` |
 | CLI | `cmd_search`、`cmd_download`、`cmd_audio`、`build_parser`、`main` |
+
+---
+
+## 作为 Agent 技能使用（SKILL.md）
+
+仓库根目录的 [`SKILL.md`](SKILL.md) 是同一套工具的**面向 AI Agent 的入口**：agent 只读它，就能知道该跑什么命令、什么时候该停下来要 Token、失败后怎么兜底。两个文件的关系是「索引」与「全书」——SKILL.md 只放执行必需的要点（约 150 行），原理、实测数据、排错细节都在本 README。
+
+### 目录结构
+
+Agent 平台（Claude Skills / DSH / OpenCode 等）通常按 `skills/<name>/SKILL.md` 加载，因此脚本和文档必须放在同一目录：
+
+```text
+smartedu-textbook/
+├── SKILL.md              # ← Agent 加载入口（含 YAML frontmatter）
+├── README.md
+├── scripts/
+│   └── download_smartedu.py
+└── ...
+```
+
+`SKILL.md` 开头的 frontmatter 决定它何时被激活：
+
+```yaml
+---
+name: smartedu-textbook
+description: >-
+  Search, index, and download textbooks and accompanying audio materials from the National
+  Smart Education Platform of China (国家中小学智慧教育平台, basic.smartedu.cn). ... 
+  Use when the user wants to find, download, or batch-fetch Chinese school textbooks
+  (电子教材/教材) or their 听力音频.
+---
+```
+
+`name` 必须与目录名一致；`description` 里写清**触发词**（电子教材 / 教材 / 听力音频 / textbook），模型靠它判断该不该加载。
+
+### 安装
+
+**方式一：软链到技能目录**（推荐，仓库更新后立即生效）
+
+```bash
+# 以 DSH / 兼容 Claude Skills 的目录约定为例
+ln -s "$PWD/smartedu-textbook" ~/.agents/skills/smartedu-textbook
+
+# Claude Code 用户通常放在 ~/.claude/skills/
+# OpenCode 用户通常放在 ~/.config/opencode/skills/
+```
+
+**方式二：直接复制**（需要手动重新复制才能拿到更新）
+
+```bash
+cp -r smartedu-textbook ~/.agents/skills/
+```
+
+安装后用 `ls ~/.agents/skills/smartedu-textbook` 确认能看到 `SKILL.md`、`scripts/`、`README.md` 三样东西。脚本只依赖标准库，**不需要在技能目录里 `pip install`，也不需要写权限**——缓存一律落在 `$SMARTEDU_CACHE_DIR` 或用户缓存目录。
+
+### 使用范例
+
+装好之后不需要记命令，直接对 Agent 提需求即可。下面每条的「Agent 会做的事」就是它实际会跑的命令：
+
+**范例 1：找一本教材**
+
+> 「帮我找人教版一年级上册的数学电子课本」
+
+Agent 会执行 `search 小学 数学 人教版 一年级 上册`，把命中的 `contentId` 和分类面包屑返回给你确认。关键词是 AND 匹配，所以它会优先用「学科 + 出版社 + 年级 + 册次」的组合。
+
+**范例 2：下载指定教材**
+
+> 「下载人教版一年级上册数学，存到 ~/Downloads」
+
+```bash
+python3 scripts/download_smartedu.py search 小学 数学 人教版 一年级 上册 --json
+# → c3e06fe4-c6b3-49cb-8727-4f8ff69bbfbc
+python3 scripts/download_smartedu.py download c3e06fe4-c6b3-49cb-8727-4f8ff69bbfbc \
+    -o ~/Downloads/数学一年级上册.pdf
+```
+
+**Agent 的决策顺序**（写死在 SKILL.md 里）：
+
+1. 先跑 `doctor` 看有没有可用 Token；
+2. 有 Token → `vector` 模式拿原版矢量 PDF（更小、缩放清晰）；
+3. 没有 Token 但用户有浏览器登录态 → 提示取 `UC_TOKEN`；
+4. 完全无凭证 → 自动退到 `--mode slices`，保证任务不空手而归。
+
+**范例 3：批量下载一整个年级**
+
+> 「把五年级上下册的语文教材都下下来」
+
+Agent 会用 `--json` 拿全部命中，再逐条 `download`：
+
+```bash
+python3 scripts/download_smartedu.py search 小学 语文 五年级 --json \
+  | jq -r '.[] | "\(.id)\t\(.title)"' \
+  | while IFS=$'\t' read -r id title; do
+      python3 scripts/download_smartedu.py download "$id" -o "out/$title.pdf"
+    done
+```
+
+**范例 4：只要听力音频**
+
+> 「下载教科版英语五年级上册的听力，每单元一个文件夹」
+
+```bash
+python3 scripts/download_smartedu.py audio 27eb5941-f566-431a-a2a6-92e45a2995e1 -o ./audios
+```
+
+Agent 会说明产出是 32 个文件、带 Token 时是 mp3、免登录时自动回退 ogg——**不要承诺「一定是 mp3」**，那是平台鉴权决定的。
+
+反例同样值得知道：**不是每本书都有听力**。语文、数学课本的 `relation_audios` 为空，脚本会明确报「该教材没有配套听力音频」而不是静默产出空目录——上面那本人教版一年级上册数学就是如此，Agent 应当据此告诉用户「这本只有课本、没有听力」，而不是反复重试。
+
+**范例 5：报错了怎么办**
+
+> 「下载报 401」
+
+Agent 会先跑 `doctor --verify`，按四段结果定位：Token 过期 → 让你重新复制；签名链路不通 → 提示可能是平台风控；缓存不可写 → 给 `SMARTEDU_CACHE_DIR` 方案。这些分支在 SKILL.md 的「常见问题与排错」表里逐条对应。
+
+### 自己写 Agent 时的最小约定
+
+如果你想把这个技能接到别的 agent 框架里，只需要保证三件事：
+
+| 约定 | 说明 |
+|---|---|
+| 工作目录 | 把 `<skill-dir>` 解析成仓库绝对路径，所有命令都在该路径下执行 |
+| 凭证 | 让 agent 通过 `--token-from-shell` 或环境变量取，**不要把 Token 写进 prompt / 日志** |
+| 失败兜底 | `download` 失败时先试 `--mode slices`，它零 Token、零账号 |
+
+一份可直接粘进 system prompt 的最小说明：
+
+```text
+你可以使用 smartedu-textbook 技能下载中国中小学电子教材。
+- 检索：python3 <skill-dir>/scripts/download_smartedu.py search <学科> <出版社> <年级> <册次>
+- 下载：…… download <contentId> -o <path> --token-from-shell
+- 无凭证时加 --mode slices，仍可拿到图片版 PDF
+- 出错先跑 …… doctor --verify，并按提示处理
+```
 
 ---
 
