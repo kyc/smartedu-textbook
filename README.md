@@ -299,15 +299,92 @@ Token 有效期实测为 **7 天**（`expires_at` 比签发时间晚整 7 天，
 
 所有错误都以 `错误：……` 开头打印到 **stderr** 并返回退出码 1；`Ctrl-C` 返回 130。
 
-### 从 `~/.zshrc` 取 Token
+### 取 Token 的几种方式（跨 shell / 跨平台）
 
-如果平时把 Token 写进 `~/.zshrc`，可以用下面这行把它读进当前 shell（不落进命令历史）：
+Token 是约 1.1 KB 的 Base64 长串。下面三种方式按「推荐程度」排列，任选其一；都只用 `python3`（本工具的依赖），不依赖 zsh 或 GNU grep。
+
+**方式 A：直接命令行传参**（最省事，临时用一次）
 
 ```bash
-export UC_TOKEN="$(grep -oP '^\s*export\s+UC_TOKEN=["\x27]?\K[^"\x27\s#]+' ~/.zshrc | tail -1)"
+# 各 shell 通用写法，注意两端引号不能省
+python3 scripts/download_smartedu.py download <contentId> --token "<粘贴 Token>"
 ```
 
-注意：Token 是约 1.1 KB 的 Base64 长串，**不要**把它加进 `~/.zshrc` 后又贴到 issue/日志里。
+缺点：会留在 shell 历史里。彻底用完建议 `history -d` 删掉，或改用下面两种。
+
+**方式 B：环境变量**（变量设置一次，多次下载复用）
+
+| Shell | 写法 | 备注 |
+|---|---|---|
+| bash / zsh / ksh | `export UC_TOKEN='<Token>'` | 写进 `~/.bashrc` / `~/.zshrc` 可持久化 |
+| fish | `set -gx UC_TOKEN '<Token>'` | fish 语法，`export` 不可用 |
+| PowerShell | `$env:UC_TOKEN = '<Token>'` | 会话级；持久化用 `[Environment]::SetEnvironmentVariable` |
+| cmd.exe | `set UC_TOKEN=<Token>` | 会话级；持久化用 `setx` |
+
+Token 里有 `+ / =` 等字符，**PowerShell 和 cmd 下必须用单引号包住**，否则部分字符会被解释。
+
+**方式 C：从已有的 shell 配置里读**（已经写过一次、不想再复制）
+
+各 shell 配置文件不同：bash 用 `~/.bashrc`，zsh 用 `~/.zshrc`，fish 用 `~/.config/fish/config.fish`，PowerShell 用 `$PROFILE`。把下面这段存成 `with_token.py`，它会按三种 shell 语法解析并以环境变量注入，然后把参数原样转给 CLI：
+
+```python
+# with_token.py —— 与 download_smartedu.py 放在同一目录，或自行改路径
+import os, re, subprocess, sys
+
+PAT = re.compile(r"""(?x)
+    (?: export\s+UC_TOKEN\s*=\s*
+      | set\s+(?:-\w+\s+)*UC_TOKEN\s+
+      | \$env:UC_TOKEN\s*=\s* )
+    \s*['"]?(?P<val>[^'"\s;#]+)
+""", re.I)
+
+def candidates():
+    home = os.path.expanduser("~")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return [
+        os.path.join(home, ".bashrc"), os.path.join(home, ".bash_profile"),
+        os.path.join(home, ".zshrc"), os.path.join(home, ".zprofile"),
+        os.path.join(xdg, "fish", "config.fish"),
+        # PowerShell profile：Windows / macOS / Linux 文件名一致，位置不同
+        os.path.join(xdg, "powershell", "Microsoft.PowerShell_profile.ps1"),
+        os.path.join(home, "Documents", "PowerShell",
+                     "Microsoft.PowerShell_profile.ps1"),
+    ]
+
+for path in candidates():
+    if not os.path.isfile(path):
+        continue
+    text = open(path, encoding="utf-8", errors="ignore").read()
+    found = PAT.findall(text)
+    if found:
+        os.environ["UC_TOKEN"] = found[-1]
+        print(f"已从 {path} 读取 UC_TOKEN（{len(found[-1])} 字符）", file=sys.stderr)
+        break
+else:
+    sys.exit("未在常见 shell 配置中找到 UC_TOKEN，请用 --token 或环境变量直接设置")
+
+subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__),
+                                            "scripts", "download_smartedu.py"),
+                *sys.argv[1:]], check=False)
+```
+
+```bash
+python3 with_token.py download <contentId> -o out.pdf
+python3 with_token.py audio <contentId>
+```
+
+支持的行写法（各取最后一次出现）：
+
+| 行 | 来源 |
+|---|---|
+| `export UC_TOKEN=abc` / `export UC_TOKEN="abc"` / `export UC_TOKEN='abc'` | bash / zsh |
+| `set -gx UC_TOKEN 'abc'` | fish |
+| `$env:UC_TOKEN = "abc"` | PowerShell |
+| `setx UC_TOKEN abc` | cmd（仅需手动 `set` 一次即可，脚本不扫描 cmd 注册表） |
+
+解析按 shell 语法而不是按平台假设，因此 Windows 上装了 Git Bash、或者 Linux 上跑 PowerShell 都能用。若你的配置文件在别处（`ZDOTDIR` 改了 zsh 配置目录、PowerShell 用了 `OneDrive` 文档目录），把路径直接加到 `candidates()` 列表里即可。
+
+> 注意：Token 有效期实测为签发后 **7 天**。写进 `~/.bashrc` / `~/.zshrc` / `config.fish` 这类配置文件里方便，但**不要把文件内容贴到 issue、聊天记录或日志里**——那等于把账号凭证公开。更稳妥的做法是放在一个权限 600 的独立文件（如 `~/.config/smartedu-token`）里，用 `UC_TOKEN="$(cat …)"` 读。
 
 ---
 
