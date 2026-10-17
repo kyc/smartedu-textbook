@@ -5,8 +5,9 @@ description: >-
   Smart Education Platform of China (国家中小学智慧教育平台, basic.smartedu.cn). Covers the full
   catalog (3,565 resources incl. PEP, Yuwen, Math, English textbooks), offline HMAC-SHA256
   signed vector PDF download, zero-token image-slice PDF export with byte-identical JPEG embedding,
-  and listening-audio extraction. Use when the user wants to find, download, or batch-fetch
-  Chinese school textbooks (电子教材/教材) or their 听力音频.
+  listening-audio extraction, and a cross-shell `doctor` self-check for the UC_TOKEN credential.
+  Use when the user wants to find, download, or batch-fetch Chinese school textbooks
+  (电子教材/教材) or their 听力音频.
 ---
 
 # SmartEdu 教材与听力资源检索下载技能 (smartedu-textbook)
@@ -29,6 +30,7 @@ description: >-
 | **原版矢量 PDF**（推荐） | `... download <contentId> -o out.pdf` | 需 `UC_TOKEN`。离线计算 HMAC-SHA256 签名，直连私有 CDN。 |
 | **免登录切片 PDF** | `... download <contentId> --mode slices -o out.pdf` | 零 Token，公开通道拉原图并字节级无损封装为 PDF。 |
 | **配套听力音频** | `... audio <contentId> -o ./audios` | 每曲只落一份，ogg/mp3 自动回退。 |
+| **环境自检** | `... doctor --verify` | 查 Token 来源/有效期、缓存目录、接口与签名。 |
 
 **缓存位置**：默认 `$XDG_CACHE_HOME/smartedu-textbook`（即 `~/.cache/smartedu-textbook`），可用环境变量 `SMARTEDU_CACHE_DIR` 覆盖。skill 目录本身**不需要写权限**。
 
@@ -94,19 +96,28 @@ python3 <skill-dir>/scripts/download_smartedu.py search 小学 英语 教科版 
 
 ### 工作流 2：下载原版矢量 PDF
 
-需要 `UC_TOKEN`——从已登录浏览器的 Cookie `UC_TOKEN-xxx` 或 localStorage `ND_UC_AUTH-xxx` 的 `&token=` 值复制，形式为 `Base64(JSON)`，解码后含 `access_token` 与 `mac_key`（以及 `expires_at`，通常 7 天有效）。
+需要 `UC_TOKEN`——从已登录浏览器的 Cookie `UC_TOKEN-xxx` 或 localStorage `ND_UC_AUTH-xxx` 的 `&token=` 值复制，形式为 `Base64(JSON)`，解码后含 `access_token` 与 `mac_key`（以及 `expires_at`，实测签发后 7 天有效）。
+
+**先自检**（诊断命令，只打印掩码，不会泄露凭证）：
 
 ```bash
-# 若已写进 ~/.zshrc，直接在当前 shell 里生效（避免 token 进入命令历史）
-source ~/.zshrc
+python3 <skill-dir>/scripts/download_smartedu.py doctor --verify
+```
 
-# 非交互场景可直接从 zshrc 提取后注入，不落盘到历史
-export UC_TOKEN="$(grep -oP '^\s*export\s+UC_TOKEN=["\x27]?\K[^"\x27\s#]+' ~/.zshrc | tail -1)"
+它会报告 Token 从哪来、是否过期、缓存目录是否可写、公开接口与签名链路是否通。
 
+```bash
+# 四种给 Token 的方式，优先级：--token > 环境变量 > shell 配置
+python3 <skill-dir>/scripts/download_smartedu.py download "<contentId>" --token "<值>"
+export UC_TOKEN="<值>"          # fish: set -gx；PowerShell: $env:UC_TOKEN
+python3 <skill-dir>/scripts/download_smartedu.py download "<contentId>" --token-from-shell
+python3 <skill-dir>/scripts/download_smartedu.py download "<contentId>" --mode slices   # 零 Token 兜底
+
+# 示例
 python3 <skill-dir>/scripts/download_smartedu.py download "27eb5941-f566-431a-a2a6-92e45a2995e1" -o english_5a.pdf
 ```
 
-先自查有效性：把 token 解码看 `expires_at` 是否已过；过期的 token 下载会得到 401。
+`--token-from-shell` 按 shell 语法扫描 `~/.bashrc`、`~/.zshrc`、`~/.zprofile`、`~/.zshenv`、fish 的 `config.fish` 与 PowerShell profile（含 `XDG_CONFIG_HOME` 与 OneDrive 路径），不依赖 zsh 或 GNU grep。
 
 签名算法（脚本已内置 `sign_nd_mac`）：
 

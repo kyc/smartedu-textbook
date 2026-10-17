@@ -32,23 +32,26 @@
 # 1. 环境要求：Python 3.8+，无需 pip install
 python3 --version
 
-# 2. 检索教材，拿到 contentId
+# 2. 自检：Token 在哪、是否过期、缓存目录是否可写、接口是否通
+python3 scripts/download_smartedu.py doctor --verify
+
+# 3. 检索教材，拿到 contentId
 python3 scripts/download_smartedu.py search 小学 英语 教科版 五年级
 
-# 3A. 免登录下载（推荐先用这个验证链路是否通畅）
+# 4A. 免登录下载（推荐先用这个验证链路是否通畅）
 python3 scripts/download_smartedu.py download 27eb5941-f566-431a-a2a6-92e45a2995e1 \
     --mode slices -o english_5a_slices.pdf
 
-# 3B. 有 UC_TOKEN 时下载原版矢量 PDF（体积更小、缩放更清晰）
+# 4B. 有 UC_TOKEN 时下载原版矢量 PDF（体积更小、缩放更清晰）
 export UC_TOKEN='<从浏览器复制>'
 python3 scripts/download_smartedu.py download 27eb5941-f566-431a-a2a6-92e45a2995e1 \
     -o english_5a.pdf
 
-# 4. 配套听力（每曲一份，格式自动回退）
+# 5. 配套听力（每曲一份，格式自动回退）
 python3 scripts/download_smartedu.py audio 27eb5941-f566-431a-a2a6-92e45a2995e1 -o ./english_5a_audios
 ```
 
-三条命令都是幂等的：重复执行只会覆盖同名输出、复用已有缓存，不会重复拉取全库索引。
+所有命令都是幂等的：重复执行只会覆盖同名输出、复用已有缓存，不会重复拉取全库索引。
 
 ---
 
@@ -92,7 +95,8 @@ python3 scripts/download_smartedu.py search <关键词...> [--limit N] [--json] 
 ### `download` — 下载教材 PDF
 
 ```bash
-python3 scripts/download_smartedu.py download <contentId> [-o 输出路径] [--mode vector|slices] [--token TOKEN]
+python3 scripts/download_smartedu.py download <contentId> [-o 输出路径] \
+    [--mode vector|slices] [--token TOKEN] [--token-from-shell]
 ```
 
 | 参数 | 默认 | 说明 |
@@ -101,13 +105,14 @@ python3 scripts/download_smartedu.py download <contentId> [-o 输出路径] [--m
 | `-o / --output` | `<书名>.pdf`（当前目录） | 输出路径；父目录会自动创建 |
 | `--mode` | `vector` | `vector` = 原版矢量 PDF（需 Token）；`slices` = 免登录切片合成 |
 | `--token` | 环境变量 `UC_TOKEN` | Base64(JSON) 形式的 UC_TOKEN，命令行传参会留在 shell 历史里，优先用环境变量 |
+| `--token-from-shell` | 关 | 前两者都没有时，自动从 bash/zsh/fish/PowerShell 配置里读（见下面「取 Token 的几种方式」） |
 
 未指定 `-o` 时文件名取自远端真实书名，并过滤 `\ / : * ? " < > |` 等非法字符、压缩空白为下划线。
 
 ### `audio` — 下载配套听力
 
 ```bash
-python3 scripts/download_smartedu.py audio <contentId> [-o 输出目录] [--token TOKEN]
+python3 scripts/download_smartedu.py audio <contentId> [-o 输出目录] [--token TOKEN] [--token-from-shell]
 ```
 
 - 默认输出目录 `<书名>_audios/`。
@@ -115,6 +120,34 @@ python3 scripts/download_smartedu.py audio <contentId> [-o 输出目录] [--toke
 - 检索结果每条只保留**一个**音频文件：同一曲目在 JSON 里有 3~5 个等价变体（含 `clip-` 片头版），脚本按条目去重。
 - 格式优先级：**有 Token** → 非 clip 的 mp3 → 非 clip 的 ogg → 其余；**无 Token** → 非 clip 的 ogg → 非 clip 的 mp3 → 其余。任一格式失败会继续尝试下一个变体。
 - 结束时打印成功数；部分失败只警告（可用 Token 重试），**全部失败**才以非 0 退出。
+
+### `doctor` — 环境自检
+
+```bash
+python3 scripts/download_smartedu.py doctor           # 离线检查
+python3 scripts/download_smartedu.py doctor --verify  # 额外联网验证
+```
+
+分四段检查，每段给出 `✓ / ! / ✗ / -` 结论，最后汇总「结论」：
+
+| 段 | 检查内容 |
+|---|---|
+| `[1] Token 来源` | 环境变量与各 shell 配置里找到的 Token（**只打印掩码**，如 `eyJz…fQ==`），并说明生效顺序 |
+| `[2] Token 有效性` | Base64/JSON 是否可解析、`access_token`+`mac_key` 是否齐全、`expires_at` 是否过期（不足 24 小时给警告） |
+| `[3] 缓存目录` | 实际可写位置；首选目录不可写时提示已回落及 `SMARTEDU_CACHE_DIR` |
+| `[4] 网络与接口` | `--verify` 时拉一次全库索引，并用真 Token 打一次签名请求（走到鉴权失败为止即证明链路） |
+
+退出码始终为 0（它是诊断命令，不是断言）；要看具体哪一步失败就看 `✗` 行。示例：
+
+```text
+[2] Token 有效性
+  ✓ 字段：access_token + mac_key 齐全
+  ✓ 有效期至 2026-10-24 15:11 UTC+08:00（剩余 6 天 19 小时）
+
+[4] 网络与接口
+  ✓ 公开接口：索引 3565 条，其中 654 条无分类（平台未收录，属正常）
+  ✓ 签名链路：签名校验通过（详情接口正常返回：…英语 五年级上册）
+```
 
 ---
 
@@ -296,6 +329,7 @@ Token 有效期实测为 **7 天**（`expires_at` 比签发时间晚整 7 天，
 | 搜不到 | AND 匹配、关键词过长 | 减词、用书名主体，或 `--refresh` |
 | `UC_TOKEN 不是合法的 Base64(JSON)` | 复制时截断、带上了 `Bearer` 之外的字符 | 重新从浏览器复制完整值 |
 | 缓存写不进去 | `~/.cache` 不可写（沙箱/只读挂载） | 设 `SMARTEDU_CACHE_DIR` 到可写目录 |
+| 不知道 Token 到底有没有、在不在有效期 | — | 跑 `python3 scripts/download_smartedu.py doctor --verify`，四段体检一次看全 |
 
 所有错误都以 `错误：……` 开头打印到 **stderr** 并返回退出码 1；`Ctrl-C` 返回 130。
 
@@ -323,66 +357,28 @@ python3 scripts/download_smartedu.py download <contentId> --token "<粘贴 Token
 
 Token 里有 `+ / =` 等字符，**PowerShell 和 cmd 下必须用单引号包住**，否则部分字符会被解释。
 
-**方式 C：从已有的 shell 配置里读**（已经写过一次、不想再复制）
+**方式 C：让脚本自己去读配置**（不用复制粘贴，也不用手搓脚本）
 
-各 shell 配置文件不同：bash 用 `~/.bashrc`，zsh 用 `~/.zshrc`，fish 用 `~/.config/fish/config.fish`，PowerShell 用 `$PROFILE`。把下面这段存成 `with_token.py`，它会按三种 shell 语法解析并以环境变量注入，然后把参数原样转给 CLI：
+已经写过一次 Token、但不想再复制的话，加 `--token-from-shell`，脚本会按 **shell 语法**（而不是按平台猜测）扫描常见配置：
 
-```python
-# with_token.py —— 与 download_smartedu.py 放在同一目录，或自行改路径
-import os, re, subprocess, sys
-
-PAT = re.compile(r"""(?x)
-    (?: export\s+UC_TOKEN\s*=\s*
-      | set\s+(?:-\w+\s+)*UC_TOKEN\s+
-      | \$env:UC_TOKEN\s*=\s* )
-    \s*['"]?(?P<val>[^'"\s;#]+)
-""", re.I)
-
-def candidates():
-    home = os.path.expanduser("~")
-    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-    return [
-        os.path.join(home, ".bashrc"), os.path.join(home, ".bash_profile"),
-        os.path.join(home, ".zshrc"), os.path.join(home, ".zprofile"),
-        os.path.join(xdg, "fish", "config.fish"),
-        # PowerShell profile：Windows / macOS / Linux 文件名一致，位置不同
-        os.path.join(xdg, "powershell", "Microsoft.PowerShell_profile.ps1"),
-        os.path.join(home, "Documents", "PowerShell",
-                     "Microsoft.PowerShell_profile.ps1"),
-    ]
-
-for path in candidates():
-    if not os.path.isfile(path):
-        continue
-    text = open(path, encoding="utf-8", errors="ignore").read()
-    found = PAT.findall(text)
-    if found:
-        os.environ["UC_TOKEN"] = found[-1]
-        print(f"已从 {path} 读取 UC_TOKEN（{len(found[-1])} 字符）", file=sys.stderr)
-        break
-else:
-    sys.exit("未在常见 shell 配置中找到 UC_TOKEN，请用 --token 或环境变量直接设置")
-
-subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__),
-                                            "scripts", "download_smartedu.py"),
-                *sys.argv[1:]], check=False)
-```
+| 扫描位置 | 语法 |
+|---|---|
+| `~/.bashrc`、`~/.bash_profile` | `export UC_TOKEN=...` |
+| `~/.zshrc`、`~/.zprofile`、`~/.zshenv` | `export UC_TOKEN=...` |
+| `$XDG_CONFIG_HOME/fish/config.fish`（默认 `~/.config/fish/`） | `set -gx UC_TOKEN ...` |
+| PowerShell profile（`$XDG_CONFIG_HOME/powershell/`、`~/Documents/PowerShell/`、`~/OneDrive/Documents/PowerShell/`） | `$env:UC_TOKEN = ...` |
 
 ```bash
-python3 with_token.py download <contentId> -o out.pdf
-python3 with_token.py audio <contentId>
+python3 scripts/download_smartedu.py download <contentId> --token-from-shell
+python3 scripts/download_smartedu.py audio <contentId> --token-from-shell
 ```
 
-支持的行写法（各取最后一次出现）：
+细节：
 
-| 行 | 来源 |
-|---|---|
-| `export UC_TOKEN=abc` / `export UC_TOKEN="abc"` / `export UC_TOKEN='abc'` | bash / zsh |
-| `set -gx UC_TOKEN 'abc'` | fish |
-| `$env:UC_TOKEN = "abc"` | PowerShell |
-| `setx UC_TOKEN abc` | cmd（仅需手动 `set` 一次即可，脚本不扫描 cmd 注册表） |
-
-解析按 shell 语法而不是按平台假设，因此 Windows 上装了 Git Bash、或者 Linux 上跑 PowerShell 都能用。若你的配置文件在别处（`ZDOTDIR` 改了 zsh 配置目录、PowerShell 用了 `OneDrive` 文档目录），把路径直接加到 `candidates()` 列表里即可。
+- 取**文件中最后出现的**一处定义；引号、行尾注释、`--token` 前空格都能正确识别。
+- 顺序固定为 `--token` > 环境变量 `UC_TOKEN` > shell 配置，不会意外覆盖你临时传给命令行的值。
+- 配置文件在别处（改过 `ZDOTDIR`、PowerShell 用了 OneDrive 文档目录）时，脚本也会扫 `XDG_CONFIG_HOME` 与 OneDrive 路径；仍找不到就报错并列出查过的文件。
+- 先跑 `doctor` 可以看到它到底从哪个文件读到了什么（只显示掩码）。
 
 > 注意：Token 有效期实测为签发后 **7 天**。写进 `~/.bashrc` / `~/.zshrc` / `config.fish` 这类配置文件里方便，但**不要把文件内容贴到 issue、聊天记录或日志里**——那等于把账号凭证公开。更稳妥的做法是放在一个权限 600 的独立文件（如 `~/.config/smartedu-token`）里，用 `UC_TOKEN="$(cat …)"` 读。
 
@@ -419,6 +415,8 @@ smartedu-textbook/
 | 通道 A | `download_vector_pdf` |
 | 通道 B | `_slice_base_dir`、`_page_mirrors`、`_jpeg_size`、`_write_jpeg_pdf`、`download_slices_pdf` |
 | 音频 | `download_audios` |
+| Token 获取 | `decode_uc_token`、`token_expires_at`、`scan_shell_configs`、`resolve_token` |
+| 自检 | `cmd_doctor`、`_doctor_probe_public`、`_doctor_probe_signed`、`_mask` |
 | CLI | `cmd_search`、`cmd_download`、`cmd_audio`、`build_parser`、`main` |
 
 ---

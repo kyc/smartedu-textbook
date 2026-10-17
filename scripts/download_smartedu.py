@@ -8,11 +8,13 @@ SmartEdu (国家中小学智慧教育平台) 全平台教材库（3,565 册）�
   3. 离线签名极速下载 (vector 模式)：本地离线计算 NetDragon HMAC-SHA256 签名，满速下载原版矢量 PDF。
   4. 免登录高清切片下载 (slices 模式)：零 Token 依赖，拉取公网开放的高清原图并按 72dpi 封装为 PDF。
   5. 配套听力音频下载 (audio 模式)：从 relation_audios.json 拉取 MP3/OGG，同样支持签名与免登录双通道。
+  6. 环境自检 (doctor 模式)：跨 shell / 跨平台定位 UC_TOKEN，校验有效期与签名，并体检缓存目录。
 
 用法速览：
   download_smartedu.py search 小学 英语 教科版 五年级 [--refresh] [--json]
-  download_smartedu.py download <contentId> [-o out.pdf] [--mode vector|slices] [--token ...]
-  download_smartedu.py audio    <contentId> [-o dir/] [--token ...]
+  download_smartedu.py download <contentId> [-o out.pdf] [--mode vector|slices] [--token ...] [--token-from-shell]
+  download_smartedu.py audio    <contentId> [-o dir/] [--token ...] [--token-from-shell]
+  download_smartedu.py doctor   [--verify]
 """
 
 import sys
@@ -26,9 +28,10 @@ import hmac
 import hashlib
 import argparse
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -278,23 +281,134 @@ def sign_nd_mac(url: str, access_token: str, mac_key: str, method: str = "GET") 
 
 def parse_uc_token(uc_token: str) -> Tuple[str, str]:
     """解析 Base64(JSON) 形式的 UC_TOKEN，返回 (access_token, mac_key)。"""
-    raw = uc_token.strip()
+    info = decode_uc_token(uc_token)
+    if not info:
+        raise SmartEduError(
+            "UC_TOKEN 不是合法的 Base64(JSON)。\n"
+            "  正确来源：浏览器 Cookie `UC_TOKEN-xxx` 或 localStorage `ND_UC_AUTH-xxx &token` 的值，"
+            "解码后应含 access_token 与 mac_key 两个字段。"
+        )
+    access_token, mac_key = info.get("access_token"), info.get("mac_key")
+    if not access_token or not mac_key:
+        raise SmartEduError("UC_TOKEN 缺少 access_token 或 mac_key 字段，可能复制不完整或已过期，请重新获取。")
+    return access_token, mac_key
+
+
+def decode_uc_token(uc_token: str) -> Optional[dict]:
+    """宽松解析 UC_TOKEN，解析失败返回 None（供 doctor 诊断，不抛异常）。"""
+    raw = (uc_token or "").strip()
     if raw.lower().startswith("bearer "):
         raw = raw[7:].strip()
     raw = raw.replace("-", "+").replace("_", "/")  # 兼容 urlsafe 变体
     raw += "=" * (-len(raw) % 4)  # 补齐 padding
     try:
-        token_info = json.loads(base64.b64decode(raw))
+        info = json.loads(base64.b64decode(raw))
     except Exception:
-        raise SmartEduError(
-            "UC_TOKEN 不是合法的 Base64(JSON)。\n"
-            "  正确来源：浏览器 Cookie `UC_TOKEN-xxx` 或 localStorage `ND_UC_AUTH-xxx &token` 的值，"
-            "解码后应含 access_token 与 mac_key 两个字段。"
-        ) from None
-    access_token, mac_key = token_info.get("access_token"), token_info.get("mac_key")
-    if not access_token or not mac_key:
-        raise SmartEduError("UC_TOKEN 缺少 access_token 或 mac_key 字段，可能复制不完整或已过期，请重新获取。")
-    return access_token, mac_key
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def token_expires_at(info: dict) -> Optional[datetime]:
+    """解析 expires_at：可能是 ISO 时间串（实测格式）或 Unix 秒/毫秒时间戳。"""
+    value = info.get("expires_at")
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = value / 1000 if value > 1e12 else value
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.astimezone()
+    return None
+
+
+# 各 shell 的配置文件位置：按语法识别，而不是按平台猜测
+SHELL_CONFIG_CANDIDATES = (
+    (".bashrc", "bash"), (".bash_profile", "bash"),
+    (".zshrc", "zsh"), (".zprofile", "zsh"), (".zshenv", "zsh"),
+    ("config.fish", "fish"),
+    ("Microsoft.PowerShell_profile.ps1", "powershell"),
+)
+
+# 三种语法：export UC_TOKEN=... / set -gx UC_TOKEN ... / $env:UC_TOKEN = ...
+#
+# 注意 verbose 模式（(?x)）会把模式里的空白吞掉，所以每个分支都必须用 \s* 自己吃掉
+# 值前面的空白；不要指望「换行后的空白」被忽略，否则会静默不匹配。
+_UC_TOKEN_LINE = re.compile(
+    r"""(?x)
+    ^\s* (?:
+        export\s+UC_TOKEN\s*=\s*
+      | set\s+(?:-[a-zA-Z]+\s+)*UC_TOKEN\s+
+      | \$env:UC_TOKEN\s*=\s*
+      | \[Environment\]::SetEnvironmentVariable\(\s*['"]UC_TOKEN['"]\s*,
+    )
+    \s* ['"]? (?P<value>[^'"\s;#]+)
+    """,
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def shell_token_candidates() -> List[Tuple[Path, str]]:
+    home = Path.home()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+    paths: List[Tuple[Path, str]] = []
+    for filename, shell in SHELL_CONFIG_CANDIDATES:
+        paths.append((home / filename, shell))
+    # fish 走 XDG；PowerShell 的 profile 在 XDG 与「文档/OneDrive」下都可能存在
+    paths.append((xdg / "fish" / "config.fish", "fish"))
+    for base in (xdg / "powershell", home / "Documents" / "PowerShell",
+                 home / "OneDrive" / "Documents" / "PowerShell"):
+        paths.append((base / "Microsoft.PowerShell_profile.ps1", "powershell"))
+    return paths
+
+
+def scan_shell_configs() -> List[Tuple[Path, str, str]]:
+    """扫描常见 shell 配置，返回 [(文件, shell 类型, 取值)]，按发现顺序。"""
+    found: List[Tuple[Path, str, str]] = []
+    seen = set()
+    for path, shell in shell_token_candidates():
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        match = _UC_TOKEN_LINE.search(text)  # 取最后一行定义
+        if not match:
+            continue
+        value = match.group("value").strip()
+        if value:
+            found.append((path, shell, value))
+    return found
+
+
+def resolve_token(cli_token: Optional[str] = None, from_shell: bool = False) -> Optional[str]:
+    """按 --token → 环境变量 → shell 配置（仅 --token-from-shell）的顺序取 Token。"""
+    if cli_token:
+        return cli_token
+    env_token = (os.environ.get("UC_TOKEN") or "").strip()
+    if env_token:
+        return env_token
+    if from_shell:
+        found = scan_shell_configs()
+        if not found:
+            raise SmartEduError(
+                "已指定 --token-from-shell，但没在常见 shell 配置里找到 UC_TOKEN。\n"
+                "  查过：~/.bashrc、~/.bash_profile、~/.zshrc、~/.zprofile、~/.zshenv、\n"
+                "        $XDG_CONFIG_HOME/fish/config.fish、PowerShell profile。\n"
+                "  处理：用 --token \"<Token>\" 直接传，或先设置环境变量 UC_TOKEN。"
+            )
+        path, _shell, value = found[-1]
+        print(f"已从 {path} 读取 UC_TOKEN。", file=sys.stderr)
+        return value
+    return None
 
 
 def _download_to_file(req: urllib.request.Request, output_path: Path, label: str) -> None:
@@ -663,12 +777,15 @@ def cmd_download(args) -> None:
     out_path = out_path.expanduser().resolve()
 
     if args.mode == "vector":
-        token = args.token or os.environ.get("UC_TOKEN", "")
+        token = resolve_token(args.token, args.token_from_shell)
         if not token:
             raise SmartEduError(
                 "vector 原版下载模式需要 UC_TOKEN。\n"
-                '  方式一：export UC_TOKEN="<浏览器 Cookie UC_TOKEN-xxx 的值>"\n'
-                "  方式二：加 --mode slices 使用免登录切片合成"
+                "  方式一：--token \"<浏览器 Cookie UC_TOKEN-xxx 的值>\"\n"
+                "  方式二：export UC_TOKEN=\"<同上>\"（fish 用 set -gx，PowerShell 用 $env:UC_TOKEN）\n"
+                "  方式三：--token-from-shell 自动从 ~/.bashrc、~/.zshrc、fish 配置或 PowerShell profile 读取\n"
+                "  方式四：加 --mode slices 使用免登录切片合成\n"
+                "  排查：python3 download_smartedu.py doctor"
             )
         download_vector_pdf(details, out_path, token)
     else:
@@ -677,13 +794,134 @@ def cmd_download(args) -> None:
 
 def cmd_audio(args) -> None:
     details = get_book_details(args.id)
-    token = args.token or os.environ.get("UC_TOKEN", "")
+    token = resolve_token(args.token, args.token_from_shell)
     out_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
         else Path(_safe_filename(details.get("title") or args.id) + "_audios")
     )
-    download_audios(details, out_dir, token or None)
+    download_audios(details, out_dir, token)
+
+
+def _mask(value: str) -> str:
+    """只显示前后各 4 位，避免把完整凭证打到终端或日志里。"""
+    return value if len(value) <= 12 else f"{value[:4]}…{value[-4:]}"
+
+
+def _doctor_token_sources() -> List[Tuple[str, Optional[str]]]:
+    """按优先级收集 Token 来源，与 resolve_token 的顺序保持一致。"""
+    sources: List[Tuple[str, Optional[str]]] = [("UC_TOKEN 环境变量", (os.environ.get("UC_TOKEN") or "").strip() or None)]
+    for path, shell, value in scan_shell_configs():
+        sources.append((f"{path}（{shell}）", value))
+    return sources
+
+
+def _doctor_probe_public() -> Tuple[bool, str]:
+    """公开接口连通性与索引健康度。"""
+    try:
+        catalog = load_catalog()
+    except SmartEduError as e:
+        return False, str(e)
+    empty = sum(1 for item in catalog if not item["breadcrumbs"])
+    return True, f"索引 {len(catalog)} 条，其中 {empty} 条无分类（平台未收录，属正常）"
+
+
+def _doctor_probe_signed(token_info: dict) -> Tuple[bool, str]:
+    """用一次详情请求验证签名链路：签名正确则返回普通 JSON，错误则 401/403。"""
+    access_token, mac_key = token_info.get("access_token"), token_info.get("mac_key")
+    if not access_token or not mac_key:
+        return False, "缺少 access_token 或 mac_key"
+    url = DETAILS_API.format(content_id="27eb5941-f566-431a-a2a6-92e45a2995e1")
+    try:
+        data = http_get_json(url, auth_header=sign_nd_mac(url, access_token, mac_key))
+    except SmartEduError as e:
+        return False, str(e).splitlines()[0]
+    return True, f"签名校验通过（详情接口正常返回：{_short(data.get('title') or 'OK', 40)}）"
+
+
+def cmd_doctor(args) -> None:
+    """环境自检：Token 来源与有效期、签名链路、缓存目录、网络连通性。"""
+    print("SmartEdu 环境自检\n" + "=" * 60)
+
+    # 1. Token 来源（只打印掩码后的值）
+    print("\n[1] UC_TOKEN 来源")
+    sources = _doctor_token_sources()
+    if not sources:
+        print("  ✗ 未找到。可用以下任一方式提供：")
+        print("      --token \"<值>\"")
+        print("      export UC_TOKEN=\"<值>\"（fish: set -gx，PowerShell: $env:UC_TOKEN）")
+        print("      --token-from-shell（写入上述 shell 配置后自动读取）")
+    else:
+        for label, value in sources:
+            if value:
+                print(f"  ✓ {label}：{_mask(value)}（{len(value)} 字符）")
+        print(f"\n  生效顺序：--token > 环境变量 > shell 配置，--token-from-shell 时取最后出现的一处。")
+
+    # 2. Token 内容与有效期
+    print("\n[2] Token 有效性")
+    candidate = next((v for _, v in sources if v), None)
+    token_info = decode_uc_token(candidate) if candidate else None
+    if not candidate:
+        print("  - 跳过（没有 Token）")
+        token_info = None
+    elif not token_info:
+        print("  ✗ 不是合法的 Base64(JSON)。请确认复制的是完整值（约 1.1 KB）。")
+    else:
+        expires = token_expires_at(token_info)
+        has_keys = bool(token_info.get("access_token") and token_info.get("mac_key"))
+        print(f"  {'✓' if has_keys else '✗'} 字段：{'access_token + mac_key 齐全' if has_keys else '缺少 access_token 或 mac_key'}")
+        if expires is None:
+            print("  - 无法解析 expires_at（平台可能未提供）")
+        else:
+            remaining = expires - datetime.now(timezone.utc).astimezone()
+            hours = remaining.total_seconds() / 3600
+            if hours <= 0:
+                print(f"  ✗ 已于 {expires:%Y-%m-%d %H:%M %Z} 过期，需重新从浏览器复制。")
+            elif hours < 24:
+                print(f"  ! 仅剩 {hours:.1f} 小时（{expires:%Y-%m-%d %H:%M %Z}），建议尽快更新。")
+            else:
+                print(f"  ✓ 有效期至 {expires:%Y-%m-%d %H:%M %Z}（剩余 {remaining.days} 天 {hours % 24:.0f} 小时）")
+
+    # 3. 缓存目录
+    print("\n[3] 缓存目录")
+    try:
+        cache_dir = _cache_dir_usable()
+        catalog_file = cache_dir / CATALOG_CACHE_FILE.name
+        print(f"  ✓ 可写：{cache_dir}")
+        if cache_dir != CACHE_DIR:
+            print(f"  ! 首选目录 {CACHE_DIR} 不可写，已回落。可用 SMARTEDU_CACHE_DIR 固定位置。")
+        state = "已缓存" if catalog_file.is_file() else "尚未建立（首次 search 时拉取）"
+        print(f"  - 索引缓存：{state}")
+    except SmartEduError as e:
+        print(f"  ✗ {e}")
+        cache_dir = None
+
+    # 4. 网络
+    print("\n[4] 网络与接口")
+    if args.verify:
+        ok, msg = _doctor_probe_public()
+        print(f"  {'✓' if ok else '✗'} 公开接口：{msg}")
+        if ok and token_info:
+            ok, msg = _doctor_probe_signed(token_info)
+            print(f"  {'✓' if ok else '✗'} 签名链路：{msg}")
+    else:
+        print("  - 已跳过（加 --verify 实际请求公开接口并试签名）")
+
+    print("\n结论")
+    problems = []
+    if not candidate:
+        problems.append("没有可用 Token：vector 模式与 mp3 音频会失败，--mode slices 仍可用")
+    elif not token_info:
+        problems.append("Token 无法解析：请重新复制完整值")
+    elif token_expires_at(token_info) and token_expires_at(token_info) <= datetime.now(timezone.utc).astimezone():
+        problems.append("Token 已过期：重新从浏览器获取")
+    if cache_dir is None:
+        problems.append("缓存目录不可写：设置 SMARTEDU_CACHE_DIR")
+    if problems:
+        for p in problems:
+            print(f"  ! {p}")
+    else:
+        print("  ✓ 一切就绪，可以直接 download / audio。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -701,6 +939,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_down.add_argument("-o", "--output", help="输出文件路径（默认保存为书名.pdf）")
     p_down.add_argument("--token", help="Base64(JSON) 形式的 UC_TOKEN（未提供时读取环境变量 UC_TOKEN）")
     p_down.add_argument(
+        "--token-from-shell", action="store_true",
+        help="环境变量也没有时，自动从 bash/zsh/fish/PowerShell 配置文件里读取 UC_TOKEN",
+    )
+    p_down.add_argument(
         "--mode", choices=["vector", "slices"], default="vector",
         help="vector=原版矢量 PDF（需 Token，默认）；slices=免登录切片合成 PDF",
     )
@@ -709,6 +951,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_audio.add_argument("id", help="资源 contentId")
     p_audio.add_argument("-o", "--output", help="输出目录（默认 <书名>_audios）")
     p_audio.add_argument("--token", help="UC_TOKEN（未提供时读取环境变量 UC_TOKEN）")
+    p_audio.add_argument(
+        "--token-from-shell", action="store_true",
+        help="环境变量也没有时，自动从 bash/zsh/fish/PowerShell 配置文件里读取 UC_TOKEN",
+    )
+
+    p_doctor = sub.add_parser("doctor", help="环境自检：Token 来源与有效期、缓存目录、网络连通性")
+    p_doctor.add_argument("--verify", action="store_true", help="实际请求公开接口并试签名（会联网）")
 
     return parser
 
@@ -722,6 +971,8 @@ def main():
             cmd_download(args)
         elif args.command == "audio":
             cmd_audio(args)
+        elif args.command == "doctor":
+            cmd_doctor(args)
     except SmartEduError as e:
         print(f"\n错误：{e}", file=sys.stderr)
         sys.exit(1)
