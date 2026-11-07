@@ -654,6 +654,10 @@ python3 scripts/download_smartedu.py doctor        # 不带 --verify 时完全�
 CI（`.github/workflows/ci.yml`）在 Ubuntu / macOS / Windows × Python 3.9 / 3.12 上跑同一套离线测试，
 另有一个 job 跑不带 `--verify` 的 `doctor`——**不访问平台接口、不依赖任何凭证**，因此不会因平台风控而红。
 
+> Linux 上 Python 3.9 固定用 `ubuntu-24.04` runner：`ubuntu-latest` 已迁移到 Ubuntu 26.04，
+> 而 3.9 只提供 22.04 / 24.04 的官方构建，在 26.04 上 `setup-python` 会直接报
+> `The version '3.9' with architecture 'x64' was not found for Ubuntu 26.04`。
+
 ---
 
 ## 免责声明
